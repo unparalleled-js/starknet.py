@@ -1,9 +1,8 @@
-import typing
-from typing import List, Optional, Union
+import warnings
+from typing import Dict, List, Optional, Union, cast
 
 import aiohttp
 from marshmallow import EXCLUDE
-from starkware.starknet.services.api.gateway.transaction import AccountTransaction
 
 from starknet_py.net.client import Client
 from starknet_py.net.client_errors import ContractNotFoundError
@@ -11,31 +10,37 @@ from starknet_py.net.client_models import (
     BlockStateUpdate,
     BlockTransactionTraces,
     Call,
+    ContractClass,
     ContractCode,
-    Declare,
-    DeclaredContract,
     DeclareTransactionResponse,
     DeployAccountTransactionResponse,
     EstimatedFee,
     GatewayBlock,
     Hash,
-    Invoke,
     SentTransactionResponse,
-    StarknetTransaction,
     Tag,
     Transaction,
     TransactionReceipt,
     TransactionStatusResponse,
+    TransactionType,
 )
 from starknet_py.net.client_utils import hash_to_felt, is_block_identifier
 from starknet_py.net.http_client import GatewayHttpClient
-from starknet_py.net.models.transaction import DeployAccount
+from starknet_py.net.models.transaction import (
+    AccountTransaction,
+    Declare,
+    DeclareSchema,
+    DeployAccount,
+    DeployAccountSchema,
+    Invoke,
+    InvokeSchema,
+)
 from starknet_py.net.networks import Network, net_address_from_net
 from starknet_py.net.schemas.gateway import (
     BlockStateUpdateSchema,
     BlockTransactionTracesSchema,
+    ContractClassSchema,
     ContractCodeSchema,
-    DeclaredContractSchema,
     DeclareTransactionResponseSchema,
     DeployAccountTransactionResponseSchema,
     EstimatedFeeSchema,
@@ -57,7 +62,7 @@ class GatewayClient(Client):
         session: Optional[aiohttp.ClientSession] = None,
     ):
         """
-        Client for interacting with starknet gateway.
+        Client for interacting with Starknet gateway.
 
         :param net: Target network for the client. Can be a string with URL, one of ``"mainnet"``, ``"testnet"``
                     or dict with ``"feeder_gateway_url"`` and ``"gateway_url"`` fields
@@ -81,6 +86,10 @@ class GatewayClient(Client):
 
     @property
     def net(self) -> Network:
+        warnings.warn(
+            "Property net is deprecated in the GatewayClient.",
+            category=DeprecationWarning,
+        )
         return self._net
 
     async def get_block(
@@ -162,7 +171,7 @@ class GatewayClient(Client):
                 **block_identifier,
             },
         )
-        res = typing.cast(str, res)
+        res = cast(str, res)
         return int(res, 16)
 
     async def get_transaction(
@@ -189,7 +198,7 @@ class GatewayClient(Client):
 
     async def estimate_fee(
         self,
-        tx: Union[Invoke, Declare, DeployAccount],
+        tx: AccountTransaction,
         block_hash: Optional[Union[Hash, Tag]] = None,
         block_number: Optional[Union[int, Tag]] = None,
     ) -> EstimatedFee:
@@ -198,7 +207,7 @@ class GatewayClient(Client):
         )
         res = await self._feeder_gateway_client.post(
             method_name="estimate_fee",
-            payload=AccountTransaction.Schema().dump(tx),
+            payload=_get_payload(tx),
             params=block_identifier,
         )
 
@@ -206,7 +215,7 @@ class GatewayClient(Client):
 
     async def estimate_fee_bulk(
         self,
-        transactions: List[Union[Invoke, Declare, DeployAccount]],
+        transactions: List[AccountTransaction],
         block_hash: Optional[Union[Hash, Tag]] = None,
         block_number: Optional[Union[int, Tag]] = None,
     ) -> List[EstimatedFee]:
@@ -224,7 +233,7 @@ class GatewayClient(Client):
         )
         res = await self._feeder_gateway_client.post(
             method_name="estimate_fee_bulk",
-            payload=AccountTransaction.Schema().dump(transactions, many=True),
+            payload=_get_payload(transactions),
             params=block_identifier,
         )
 
@@ -296,26 +305,26 @@ class GatewayClient(Client):
                 **block_identifier,
             },
         )
-        res = typing.cast(str, res)
+        res = cast(str, res)
         return int(res, 16)
 
-    async def get_class_by_hash(self, class_hash: Hash) -> DeclaredContract:
+    async def get_class_by_hash(self, class_hash: Hash) -> ContractClass:
         res = await self._feeder_gateway_client.call(
             method_name="get_class_by_hash",
             params={"classHash": hash_to_felt(class_hash)},
         )
-        return DeclaredContractSchema().load(res, unknown=EXCLUDE)  # pyright: ignore
+        return ContractClassSchema().load(res, unknown=EXCLUDE)  # pyright: ignore
 
     # Only gateway methods
 
     async def _add_transaction(
         self,
-        tx: StarknetTransaction,
+        tx: AccountTransaction,
         token: Optional[str] = None,
     ) -> dict:
         res = await self._gateway_client.post(
             method_name="add_transaction",
-            payload=StarknetTransaction.Schema().dump(obj=tx),
+            payload=_get_payload(tx),
             params={"token": token} if token is not None else {},
         )
         return res
@@ -341,7 +350,7 @@ class GatewayClient(Client):
 
     async def get_contract_addresses(self) -> dict:
         """
-        Fetches the addresses of the StarkNet system contracts
+        Fetches the addresses of the Starknet system contracts
 
         :return: A dictionary indexed with contract name and a value of contract's address
         """
@@ -393,7 +402,7 @@ class GatewayClient(Client):
         nonce = await self._feeder_gateway_client.call(
             method_name="get_nonce", params=params
         )
-        nonce = typing.cast(str, nonce)
+        nonce = cast(str, nonce)
         return int(nonce, 16)
 
 
@@ -415,3 +424,18 @@ def get_block_identifier(
         return {"blockNumber": block_number}
 
     return {"blockNumber": "pending"}
+
+
+def _get_payload(
+    txs: Union[AccountTransaction, List[AccountTransaction]]
+) -> Union[List, Dict]:
+    type_to_schema = {
+        TransactionType.DECLARE: DeclareSchema(),
+        TransactionType.DEPLOY_ACCOUNT: DeployAccountSchema(),
+        TransactionType.INVOKE: InvokeSchema(),
+    }
+
+    if isinstance(txs, AccountTransaction):
+        return type_to_schema[txs.type].dump(obj=txs)
+
+    return [type_to_schema[tx.type].dump(obj=tx) for tx in txs]

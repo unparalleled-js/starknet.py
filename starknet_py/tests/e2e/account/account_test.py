@@ -1,14 +1,13 @@
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from starkware.starknet.public.abi import get_selector_from_name
 
 from starknet_py.contract import Contract
-from starknet_py.net import AccountClient, KeyPair
-from starknet_py.net.account._account_proxy import AccountProxy
+from starknet_py.hash.address import compute_address
+from starknet_py.hash.selector import get_selector_from_name
 from starknet_py.net.account.account import Account
 from starknet_py.net.account.base_account import BaseAccount
-from starknet_py.net.client import Client
 from starknet_py.net.client_errors import ClientError
 from starknet_py.net.client_models import (
     Call,
@@ -17,7 +16,8 @@ from starknet_py.net.client_models import (
     TransactionStatus,
 )
 from starknet_py.net.gateway_client import GatewayClient
-from starknet_py.net.models import StarknetChainId, compute_address
+from starknet_py.net.models import StarknetChainId
+from starknet_py.net.signer.stark_curve_signer import KeyPair
 from starknet_py.tests.e2e.fixtures.constants import MAX_FEE
 from starknet_py.transaction_exceptions import TransactionRejectedError
 
@@ -25,11 +25,17 @@ from starknet_py.transaction_exceptions import TransactionRejectedError
 @pytest.mark.run_on_devnet
 @pytest.mark.asyncio
 async def test_get_balance_throws_when_token_not_specified(account):
+    modified_account = Account(
+        address=account.address,
+        client=GatewayClient(net="custom.net"),
+        key_pair=KeyPair(1, 2),
+        chain=cast(StarknetChainId, 1),
+    )
     with pytest.raises(
         ValueError,
-        match="Argument token_address must be specified when using a custom net address",
+        match="Argument token_address must be specified when using a custom network.",
     ):
-        await account.get_balance()
+        await modified_account.get_balance()
 
 
 @pytest.mark.asyncio
@@ -136,9 +142,9 @@ async def test_get_class_hash_at(map_contract, account):
 
 
 @pytest.mark.asyncio()
-async def test_get_nonce(gateway_account, base_account_deploy_map_contract):
+async def test_get_nonce(gateway_account, map_contract):
     nonce = await gateway_account.get_nonce()
-    address = base_account_deploy_map_contract.address
+    address = map_contract.address
 
     tx = await gateway_account.execute(
         Call(
@@ -195,9 +201,7 @@ async def test_sign_deploy_account_transaction(gateway_account):
 
 
 @pytest.mark.asyncio
-async def test_deploy_account(
-    client, deploy_account_details_factory, base_account_deploy_map_contract
-):
+async def test_deploy_account(client, deploy_account_details_factory, map_contract):
     address, key_pair, salt, class_hash = await deploy_account_details_factory.get()
 
     deploy_result = await Account.deploy_account(
@@ -219,7 +223,7 @@ async def test_deploy_account(
     # Test making a tx
     res = await account.execute(
         calls=Call(
-            to_addr=base_account_deploy_map_contract.address,
+            to_addr=map_contract.address,
             selector=get_selector_from_name("put"),
             calldata=[30, 40],
         ),
@@ -307,7 +311,7 @@ async def test_deploy_account_passes_on_enough_funds(deploy_account_details_fact
 
 @pytest.mark.asyncio
 async def test_deploy_account_uses_custom_calldata(
-    client, deploy_account_details_factory
+    client, deploy_account_details_factory, fee_contract
 ):
     _, key_pair, salt, class_hash = await deploy_account_details_factory.get()
     calldata = [1, 2, 3, 4]
@@ -317,6 +321,11 @@ async def test_deploy_account_uses_custom_calldata(
         constructor_calldata=calldata,
         deployer_address=0,
     )
+
+    res = await fee_contract.functions["transfer"].invoke(
+        recipient=address, amount=int(1e25), max_fee=MAX_FEE
+    )
+    await res.wait_for_acceptance()
 
     deploy_result = await Account.deploy_account(
         address=address,
@@ -373,37 +382,17 @@ async def test_sign_declare_tx_for_fee_estimation(account, map_compiled_contract
     await account.client.wait_for_tx(result.transaction_hash)
 
 
-def _account_by_type(
-    *, address: int, client: Client, key_pair: KeyPair, account_type: str
-) -> BaseAccount:
-    if account_type == "proxy":
-        return AccountProxy(
-            AccountClient(
-                address=address,
-                client=client,
-                key_pair=key_pair,
-                chain=StarknetChainId.TESTNET,
-                supported_tx_version=1,
-            )
-        )
+@pytest.mark.asyncio
+async def test_sign_deploy_account_tx_for_fee_estimation(
+    client, deploy_account_details_factory
+):
+    address, key_pair, salt, class_hash = await deploy_account_details_factory.get()
 
-    return Account(
+    account = Account(
         address=address,
         client=client,
         key_pair=key_pair,
         chain=StarknetChainId.TESTNET,
-    )
-
-
-@pytest.mark.parametrize("account_type", ("base", "proxy"))
-@pytest.mark.asyncio
-async def test_sign_deploy_account_tx_for_fee_estimation(
-    client, deploy_account_details_factory, account_type
-):
-    address, key_pair, salt, class_hash = await deploy_account_details_factory.get()
-
-    account = _account_by_type(
-        account_type=account_type, address=address, client=client, key_pair=key_pair
     )
 
     transaction = await account.sign_deploy_account_transaction(

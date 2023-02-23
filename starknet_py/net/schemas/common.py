@@ -1,9 +1,10 @@
 from typing import Any, Mapping, Optional, Union
 
-from marshmallow import ValidationError, fields
+from marshmallow import Schema, ValidationError, fields, post_load
 
 from starknet_py.net.client_models import (
     BlockStatus,
+    StorageEntry,
     TransactionStatus,
     TransactionType,
 )
@@ -94,7 +95,9 @@ class BlockStatusField(fields.Field):
 
 class TransactionTypeField(fields.Field):
     def _serialize(self, value: Any, attr: str, obj: Any, **kwargs):
-        return value.name if value is not None else ""
+        if value == TransactionType.INVOKE:
+            return "INVOKE_FUNCTION"
+        return value.name
 
     def _deserialize(
         self,
@@ -114,3 +117,13 @@ class TransactionTypeField(fields.Field):
             )
 
         return TransactionType(value)
+
+
+class StorageEntrySchema(Schema):
+    key = Felt(data_key="key", required=True)
+    value = Felt(data_key="value", required=True)
+
+    @post_load
+    def make_dataclass(self, data, **kwargs):
+        # pylint: disable=no-self-use
+        return StorageEntry(**data)

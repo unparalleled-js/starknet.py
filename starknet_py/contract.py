@@ -7,8 +7,6 @@ from functools import cached_property
 from typing import Dict, List, Optional, Tuple, TypeVar, Union
 
 from starkware.cairo.lang.compiler.identifier_manager import IdentifierManager
-from starkware.starknet.core.os.class_hash import compute_class_hash
-from starkware.starknet.public.abi import get_selector_from_name
 from starkware.starknet.public.abi_structs import identifier_manager_from_abi
 
 from starknet_py.abi.model import Abi
@@ -16,17 +14,13 @@ from starknet_py.abi.parser import AbiParser
 from starknet_py.common import create_compiled_contract
 from starknet_py.compile.compiler import StarknetCompilationSource
 from starknet_py.constants import DEFAULT_DEPLOYER_ADDRESS
-from starknet_py.net import AccountClient
-from starknet_py.net.account._account_proxy import AccountProxy
+from starknet_py.hash.address import compute_address
+from starknet_py.hash.class_hash import compute_class_hash
+from starknet_py.hash.selector import get_selector_from_name
 from starknet_py.net.account.base_account import BaseAccount
 from starknet_py.net.client import Client
 from starknet_py.net.client_models import Call, Hash, Tag
-from starknet_py.net.models import (
-    AddressRepresentation,
-    Invoke,
-    compute_address,
-    parse_address,
-)
+from starknet_py.net.models import AddressRepresentation, Invoke, parse_address
 from starknet_py.net.udc_deployer.deployer import Deployer
 from starknet_py.proxy.contract_abi_resolver import (
     ContractAbiResolver,
@@ -38,7 +32,6 @@ from starknet_py.serialization.function_serialization_adapter import (
     FunctionSerializationAdapter,
 )
 from starknet_py.utils.contructor_args_translator import translate_constructor_args
-from starknet_py.utils.crypto.facade import pedersen_hash
 from starknet_py.utils.sync import add_sync_methods
 
 ABI = list
@@ -258,9 +251,7 @@ class PreparedFunctionCall(Call):
         if self._internal_account is not None:
             return self._internal_account
 
-        raise ValueError(
-            "Contract was created without Account or with Client that is not an account."
-        )
+        raise ValueError("Contract instance was created without providing an Account.")
 
     async def call_raw(
         self,
@@ -282,7 +273,7 @@ class PreparedFunctionCall(Call):
         Calls a method.
 
         :param block_hash: Optional block hash.
-        :return: CallResult or List[int] if return_raw is used.
+        :return: TupleDataclass representing call result.
         """
         result = await self.call_raw(block_hash=block_hash)
         return self._payload_transformer.deserialize(result)
@@ -380,13 +371,6 @@ class ContractFunction:
             else 0
         )
 
-        if version == 0:
-            warnings.warn(
-                "Transaction with version 0 is deprecated and will be removed in the future. "
-                "Use AccountClient supporting the transaction version 1",
-                category=DeprecationWarning,
-            )
-
         calldata = self._payload_transformer.serialize(*args, **kwargs)
         return PreparedFunctionCall(
             calldata=calldata,
@@ -437,7 +421,7 @@ class ContractFunction:
     def get_selector(function_name: str):
         """
         :param function_name: Contract function's name.
-        :return: A StarkNet integer selector for this function inside the contract.
+        :return: A Starknet integer selector for this function inside the contract.
         """
         return get_selector_from_name(function_name)
 
@@ -455,21 +439,18 @@ class Contract:
         self,
         address: AddressRepresentation,
         abi: list,
-        provider: Union[BaseAccount, Client] = None,  # pyright: ignore
-        *,
-        client: Optional[Client] = None,
+        provider: Union[BaseAccount, Client],
     ):
         """
         Should be used instead of ``from_address`` when ABI is known statically.
 
-        Arguments account and client are mutually exclusive and cannot be provided at the same time.
+        Arguments provider and client are mutually exclusive and cannot be provided at the same time.
 
         :param address: contract's address.
         :param abi: contract's abi.
         :param provider: BaseAccount or Client used to perform transactions.
-        :param client: client used to perform transactions.
         """
-        client, account = _unpack_provider(provider, client)
+        client, account = _unpack_provider(provider)
 
         self.account: Optional[BaseAccount] = account
         self.client: Client = client
@@ -493,8 +474,6 @@ class Contract:
         address: AddressRepresentation,
         provider: Union[BaseAccount, Client] = None,  # pyright: ignore
         proxy_config: Union[bool, ProxyConfig] = False,
-        *,
-        client: Optional[Client] = None,
     ) -> Contract:
         """
         Fetches ABI for given contract and creates a new Contract instance with it. If you know ABI statically you
@@ -513,11 +492,10 @@ class Contract:
             If set to ``False``, :meth:`Contract.from_address` will not resolve proxies.
 
             If a valid :class:`starknet_py.contract_abi_resolver.ProxyConfig` is provided, will use its values instead.
-        :param client: Client.
 
         :return: an initialized Contract instance.
         """
-        client, account = _unpack_provider(provider, client)
+        client, account = _unpack_provider(provider)
 
         address = parse_address(address)
         proxy_config = Contract._create_proxy_config(proxy_config)
@@ -530,7 +508,7 @@ class Contract:
 
     @staticmethod
     async def declare(
-        account: Union[AccountClient, BaseAccount],
+        account: BaseAccount,
         compiled_contract: str,
         *,
         max_fee: Optional[int] = None,
@@ -539,13 +517,12 @@ class Contract:
         """
         Declares a contract.
 
-        :param account: An AccountClient used to sign and send declare transaction.
+        :param account: BaseAccount used to sign and send declare transaction.
         :param compiled_contract: String containing compiled contract.
         :param max_fee: Max amount of Wei to be paid when executing transaction.
         :param auto_estimate: Use automatic fee estimation (not recommended, as it may lead to high costs).
         :return: DeclareResult instance.
         """
-        account = _account_or_proxy(account)
 
         declare_tx = await account.sign_declare_transaction(
             compiled_contract=compiled_contract,
@@ -564,7 +541,7 @@ class Contract:
 
     @staticmethod
     async def deploy_contract(
-        account: Union[AccountClient, BaseAccount],
+        account: BaseAccount,
         class_hash: Hash,
         abi: List,
         constructor_args: Optional[Union[List, Dict]] = None,
@@ -576,7 +553,7 @@ class Contract:
         """
         Deploys a contract through Universal Deployer Contract
 
-        :param account: An AccountClient used to sign and send deploy transaction.
+        :param account: BaseAccount used to sign and send deploy transaction.
         :param class_hash: The class_hash of the contract to be deployed.
         :param abi: An abi of the contract to be deployed.
         :param constructor_args: a ``list`` or ``dict`` of arguments for the constructor.
@@ -588,8 +565,6 @@ class Contract:
         :return: DeployResult instance.
         """
         # pylint: disable=too-many-arguments
-        account = _account_or_proxy(account)
-
         deployer = Deployer(
             deployer_address=deployer_address, account_address=account.address
         )
@@ -627,15 +602,20 @@ class Contract:
         Either `compilation_source` or `compiled_contract` is required.
 
         :param salt: int
-        :param compilation_source: string containing source code or a list of source files paths
-        :param compiled_contract: string containing compiled contract. Useful for reading compiled contract from a file.
-        :param constructor_args: a ``list`` or ``dict`` of arguments for the constructor.
-        :param search_paths: a ``list`` of paths used by starknet_compile to resolve dependencies within contracts.
-        :param deployer_address: address of the deployer (if not provided default 0 is used)
+        :param compilation_source:
+            String containing source code or a list of source files paths.
+
+             .. deprecated:: 0.14.0
+                Argument compilation_source is deprecated and will be removed in the future.
+                Consider using already compiled contracts.
+        :param compiled_contract: String containing compiled contract. Useful for reading compiled contract from a file.
+        :param constructor_args: A ``list`` or ``dict`` of arguments for the constructor.
+        :param search_paths: A ``list`` of paths used by starknet_compile to resolve dependencies within contracts.
+        :param deployer_address: Address of the deployer (if not provided default 0 is used).
 
         :raises: `ValueError` if neither compilation_source nor compiled_contract is provided.
 
-        :return: contract's address
+        :return: Contract's address.
         """
         # pylint: disable=too-many-arguments
         warnings.warn(
@@ -647,10 +627,11 @@ class Contract:
         compiled = create_compiled_contract(
             compilation_source, compiled_contract, search_paths
         )
+        assert compiled.abi is not None
         translated_args = translate_constructor_args(compiled.abi, constructor_args)
         return compute_address(
             salt=salt,
-            class_hash=compute_class_hash(compiled, hash_func=pedersen_hash),
+            class_hash=compute_class_hash(compiled),
             constructor_calldata=translated_args,
             deployer_address=deployer_address,
         )
@@ -665,11 +646,16 @@ class Contract:
         Computes hash for given contract.
         Either `compilation_source` or `compiled_contract` is required.
 
-        :param compilation_source: string containing source code or a list of source files paths
-        :param compiled_contract: string containing compiled contract. Useful for reading compiled contract from a file.
-        :param search_paths: a ``list`` of paths used by starknet_compile to resolve dependencies within contracts.
+        :param compilation_source: String containing source code or a list of source files paths.
+        :param compiled_contract:
+            String containing compiled contract. Useful for reading compiled contract from a file.
+
+             .. deprecated:: 0.14.0
+                Argument compilation_source is deprecated and will be removed in the future.
+                Consider using already compiled contracts.
+        :param search_paths: A ``list`` of paths used by starknet_compile to resolve dependencies within contracts.
         :raises: `ValueError` if neither compilation_source nor compiled_contract is provided.
-        :return:
+        :return: Class_hash of the contract.
         """
         warnings.warn(
             "Argument compilation_source is deprecated and will be removed in the future. "
@@ -677,10 +663,10 @@ class Contract:
             category=DeprecationWarning,
         )
 
-        compiled_contract = create_compiled_contract(
+        contract_class = create_compiled_contract(
             compilation_source, compiled_contract, search_paths
         )
-        return compute_class_hash(compiled_contract, hash_func=pedersen_hash)
+        return compute_class_hash(contract_class)
 
     @classmethod
     def _make_functions(
@@ -712,42 +698,18 @@ class Contract:
 
 
 def _unpack_provider(
-    provider: Union[BaseAccount, Client], client: Optional[Client] = None
+    provider: Union[BaseAccount, Client]
 ) -> Tuple[Client, Optional[BaseAccount]]:
     """
     Get the client and optional account to be used by Contract.
 
-    If provided with AccountClient, returns underlying Client and _AccountProxy.
     If provided with Client, returns this Client and None.
-    If provided with Account, returns underlying Client and the account.
+    If provided with BaseAccount, returns underlying Client and the account.
     """
-    if client is not None:
-        warnings.warn(
-            "Argument client has been deprecated. Use provider instead.",
-            category=DeprecationWarning,
-        )
-
-    if provider is not None and client is not None:
-        raise ValueError("Arguments provider and client are mutually exclusive.")
-
-    if provider is None and client is None:
-        raise ValueError("One of provider or client must be provided.")
-
-    provider = provider or client
-
     if isinstance(provider, Client):
-        if isinstance(provider, AccountClient):
-            return provider.client, AccountProxy(provider)
-
         return provider, None
 
     if isinstance(provider, BaseAccount):
         return provider.client, provider
 
     raise ValueError("Argument provider is not of accepted type.")
-
-
-def _account_or_proxy(account: Union[BaseAccount, AccountClient]) -> BaseAccount:
-    if isinstance(account, AccountClient):
-        return AccountProxy(account)
-    return account
