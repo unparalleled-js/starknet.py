@@ -32,7 +32,7 @@ docs = ["sphinx", "enum-tools"]
 eth-tester = ["tester"]
 
 [tool.poetry.group.dev.dependencies]
-pytest = "^6.2.5"
+pytest = "^7.2.2"
 black = "^22.3.0"
 poethepoet = "^0.11.0"
 coverage = "^6.3.0"
